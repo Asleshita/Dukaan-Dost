@@ -20,7 +20,8 @@ function createBot(deps) {
   const listNumbers = (s) => String(s || '').split(',').map((x) => x.replace(/[^\d]/g, '')).filter(Boolean);
 
   function shopFor(phone) {
-    if (!shops.has(phone)) shops.set(phone, { state: DD.defaultState(), language: 'English', script: 'native' });
+    // language/script = what we reply in now; preferred = the default for neutral messages (English commands, "hi", "namaste")
+    if (!shops.has(phone)) shops.set(phone, { state: DD.defaultState(), language: 'English', script: 'native', preferred: { language: 'English', script: 'native' } });
     return shops.get(phone);
   }
 
@@ -139,6 +140,8 @@ function createBot(deps) {
     if (/\bsummary\b/.test(low)) return Object.assign(base, { intent: 'summary' });
     if (/\bend day\b|\bclose day\b/.test(low)) return Object.assign(base, { intent: 'end_day' });
     if (/^reset\b/.test(low)) return Object.assign(base, { intent: 'reset' });
+    const wanted = simpleLanguage(low);
+    if (wanted) return Object.assign(base, { intent: 'set_language', reply_language: wanted });
     if (/^(stock|check|how many)\b/.test(low) && !/\d/.test(low)) {
       const r = E.parseNote('1 ' + low.replace(/^(stock|check|how many)\s*(of)?/, ''), s.items);
       return Object.assign(base, { intent: 'stock', product_id: r.matches.length ? r.matches[0].item.id : null });
@@ -146,6 +149,27 @@ function createBot(deps) {
     const r = E.parseNote(text, s.items);
     if (r.matches.length) return Object.assign(base, { intent: 'sales', items: r.matches.map((m) => ({ product_id: m.item.id, qty: m.qty })) });
     return Object.assign(base, { intent: 'other' });
+  }
+
+  /* Plain English commands are answered straight away, without asking the AI (faster). */
+  function quickIntent(text) {
+    const low = String(text || '').toLowerCase().replace(/[!.?,\s]+$/, '').trim();
+    if (/^(hi+|hello|hey|namaste|start|menu)$/.test(low)) return 'greeting';
+    if (/^help$/.test(low)) return 'help';
+    if (/^(plan|today'?s plan|todays plan)$/.test(low)) return 'plan';
+    if (/^(send order|order)$/.test(low)) return 'send_order';
+    if (/^(send offer|offer)$/.test(low)) return 'send_offer';
+    if (/^summary$/.test(low)) return 'summary';
+    if (/^(end day|close day)$/.test(low)) return 'end_day';
+    if (/^reset$/.test(low)) return 'reset';
+    return null;
+  }
+
+  const LANG_NAMES = ['English', 'Hindi', 'Telugu', 'Tamil', 'Kannada', 'Malayalam', 'Bengali', 'Marathi', 'Gujarati', 'Punjabi', 'Odia', 'Assamese', 'Urdu'];
+  function simpleLanguage(low) {
+    const m = /^(?:language|lang|reply in|speak|talk in)\s+([a-z]+)$/.exec(low);
+    if (!m) return null;
+    return LANG_NAMES.find((l) => l.toLowerCase() === m[1]) || null;
   }
 
   /* ---------- Sending, in the owner’s language ---------- */
@@ -173,6 +197,14 @@ function createBot(deps) {
       { id: 'send_offer', title: titles[1] },
       { id: 'summary', title: titles[2] }
     ]);
+  }
+
+  /* Twilio can’t show buttons, so the 1/2/3 menu goes inside the same message: one message, one translation, much faster. */
+  const MENU = 'What next? Reply with a number:\n1 – Send order\n2 – Send offer\n3 – Today’s summary';
+  async function sayWithMenu(to, shop, english) {
+    if (wa.textButtons) return say(to, shop, english + '\n\n' + MENU);
+    await say(to, shop, english);
+    await askNext(to, shop);
   }
 
   async function forward(numbers, text) {
@@ -205,6 +237,8 @@ function createBot(deps) {
         await say(from, shop, 'Sorry, I couldn’t understand that voice note. Please try again, or type it.');
         return;
       }
+    } else if (quickIntent(msg.text)) {
+      u = { transcript: msg.text, intent: quickIntent(msg.text), items: [], product_id: null, language: 'English', script: 'native', quick: true };
     } else if (ai.enabled()) {
       try { u = await ai.understand({ text: msg.text, items: s.items }); } catch (e) {
         console.error('[bot] AI failed, using simple reader:', e.message);
@@ -213,22 +247,36 @@ function createBot(deps) {
     } else {
       u = simpleUnderstand(msg.text, s);
     }
-    if (!msg.buttonId) { shop.language = u.language || 'English'; shop.script = u.script || 'native'; }
+    // Which language to reply in:
+    //  - "reply in Tamil" → Tamil from now on (for neutral messages too)
+    //  - English commands, "hi", "namaste" → the preferred language (English unless changed)
+    //  - anything in an Indian language (typed or voice) → that same language
+    //  - number replies 1/2/3 → keep the language we were just using
+    if (!msg.buttonId) {
+      if (u.intent === 'set_language' && u.reply_language) {
+        shop.preferred = { language: u.reply_language, script: 'native' };
+        shop.language = shop.preferred.language; shop.script = shop.preferred.script;
+      } else if (u.quick || !u.language || /^english$/i.test(u.language)) {
+        shop.language = shop.preferred.language; shop.script = shop.preferred.script;
+      } else {
+        shop.language = u.language; shop.script = u.script || 'native';
+      }
+    }
     console.log('[bot]', from, '| heard:', u.transcript || msg.text || msg.buttonId, '|', shop.language, '|', u.intent);
 
     // 2. Act on it
     switch (u.intent) {
       case 'greeting':
-        await say(from, shop, 'Namaste, ' + s.shop.owner + '! I’m *Dukaan Dost*, your stock assistant.\n\n' + HELP);
-        await say(from, shop, planText(s));
-        await askNext(from, shop);
+        await sayWithMenu(from, shop, 'Namaste, ' + s.shop.owner + '! I’m *Dukaan Dost*, your stock assistant. Talk to me in any language, typed or as a voice note. Send *help* to see everything I can do.\n\n' + planText(s));
+        break;
+      case 'set_language':
+        await say(from, shop, 'Okay! I’ll reply in ' + shop.language + ' now. You can still write or speak to me in any language. Send *plan* to see today’s plan.');
         break;
       case 'help':
         await say(from, shop, HELP);
         break;
       case 'plan':
-        await say(from, shop, planText(s));
-        await askNext(from, shop);
+        await sayWithMenu(from, shop, planText(s));
         break;
       case 'send_order': {
         const r = makeOrder(s);
@@ -249,15 +297,11 @@ function createBot(deps) {
         await say(from, shop, summaryText(s));
         break;
       case 'end_day':
-        await say(from, shop, endDayText(s));
-        await say(from, shop, planText(s));
-        await askNext(from, shop);
+        await sayWithMenu(from, shop, endDayText(s) + '\n\n' + planText(s));
         break;
       case 'reset':
         shop.state = DD.defaultState();
-        await say(from, shop, 'Demo shop reset to Day 1.');
-        await say(from, shop, planText(shop.state));
-        await askNext(from, shop);
+        await sayWithMenu(from, shop, 'Demo shop reset to Day 1.\n\n' + planText(shop.state));
         break;
       case 'sales':
         await say(from, shop, recordSales(s, u.items));

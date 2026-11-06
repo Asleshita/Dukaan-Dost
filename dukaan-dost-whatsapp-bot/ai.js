@@ -24,34 +24,60 @@ const MODEL_CANDIDATES = [
 
 let workingModel = null;
 
+// "Thinking" makes Gemini slow (several seconds per call). We switch it off, trying the
+// setting each model accepts, and remember which one worked.
+const THINKING = [{ thinkingBudget: 0 }, { thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, null];
+let thinkingIdx = 0;
+
 function enabled() { return Boolean(process.env.GEMINI_API_KEY); }
 
+function post(model, parts, json, thinking) {
+  const cfg = json ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0.2 };
+  if (thinking) cfg.thinkingConfig = thinking;
+  return fetch(API + encodeURIComponent(model) + ':generateContent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: parts }], generationConfig: cfg }),
+    signal: AbortSignal.timeout(25000)
+  });
+}
+
 async function callGemini(parts, json) {
-  const models = workingModel ? [workingModel] : MODEL_CANDIDATES;
+  const models = workingModel ? [workingModel].concat(MODEL_CANDIDATES.filter((m) => m !== workingModel)) : MODEL_CANDIDATES;
   let lastError = null;
   for (const model of models) {
-    const res = await fetch(API + encodeURIComponent(model) + ':generateContent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: parts }],
-        generationConfig: json ? { temperature: 0, responseMimeType: 'application/json' } : { temperature: 0.2 }
-      })
-    });
-    if (res.status === 404 || res.status === 400) {
-      const body = await res.text();
-      // Unknown model name → try the next one. Other 400s are real errors.
-      if (res.status === 404 || /not found|not supported|unknown model/i.test(body)) {
+    let res = null;
+    let errBody = '';
+    let t = thinkingIdx;
+    for (;;) {
+      res = await post(model, parts, json, THINKING[t]);
+      if (res.ok) break;
+      errBody = await res.text();
+      // This model doesn't accept that thinking setting → try the next setting.
+      if (res.status === 400 && /thinking/i.test(errBody) && t < THINKING.length - 1) { t += 1; continue; }
+      break;
+    }
+    if (!res.ok) {
+      // Unknown model name → try the next one.
+      if (res.status === 404 || (res.status === 400 && /not found|not supported|unknown model/i.test(errBody))) {
         lastError = new Error('Gemini model ' + model + ' unavailable');
         continue;
       }
-      throw new Error('Gemini error 400: ' + body.slice(0, 300));
+      // Busy or rate-limited → try another model.
+      if (res.status === 429 || res.status >= 500) {
+        lastError = new Error('Gemini error ' + res.status + ' on ' + model + ': ' + errBody.slice(0, 200));
+        console.error('[ai]', lastError.message);
+        continue;
+      }
+      throw new Error('Gemini error ' + res.status + ': ' + errBody.slice(0, 300));
     }
-    if (!res.ok) throw new Error('Gemini error ' + res.status + ': ' + (await res.text()).slice(0, 300));
     const data = await res.json();
-    if (!workingModel) { workingModel = model; console.log('[ai] using model', model); }
+    if (!workingModel) {
+      workingModel = model; thinkingIdx = t;
+      console.log('[ai] using model', model, 'thinking:', JSON.stringify(THINKING[t]));
+    }
     const cand = data.candidates && data.candidates[0];
-    const text = cand && cand.content && cand.content.parts ? cand.content.parts.map((p) => p.text || '').join('') : '';
+    const text = cand && cand.content && cand.content.parts ? cand.content.parts.filter((p) => !p.thought).map((p) => p.text || '').join('') : '';
     if (!text) throw new Error('Gemini returned no text');
     return text;
   }
@@ -67,7 +93,7 @@ function catalogText(items) {
   return items.map((it) => '- ' + it.id + ': ' + it.name + (it.alias && it.alias.length ? ' (also: ' + it.alias.join(', ') + ')' : '')).join('\n');
 }
 
-const INTENTS = ['sales', 'plan', 'send_order', 'send_offer', 'stock', 'summary', 'end_day', 'help', 'greeting', 'reset', 'other'];
+const INTENTS = ['sales', 'plan', 'set_language', 'send_order', 'send_offer', 'stock', 'summary', 'end_day', 'help', 'greeting', 'reset', 'other'];
 
 /*
  * input: { text?: string, audio?: { data: base64, mimeType: string }, items: product list }
@@ -88,13 +114,15 @@ async function understand(input) {
     ' "script": "native" if written in the language\'s own script or spoken, "latin" if an Indian language typed in English letters,',
     ' "intent": one of ' + INTENTS.map((i) => '"' + i + '"').join(', ') + ',',
     ' "items": [{"product_id": "id from the list", "qty": whole number}],',
-    ' "product_id": "id from the list or null"}',
+    ' "product_id": "id from the list or null",',
+    ' "reply_language": "only for intent set_language: the language they want replies in, e.g. Tamil, else null"}',
     '',
     'Intent guide: "sales" = the owner reports what sold (fill items). "plan" = wants today\'s plan or what to order. ',
     '"send_order" = wants to send the order to the distributor. "send_offer" = wants to send the discount offer to customers. ',
     '"stock" = asks how much of one product is left (fill product_id). "summary" = asks about today\'s sales. ',
     '"end_day" = closing the shop for the day. "help" = asks what you can do. "greeting" = hello or namaste only. ',
-    '"reset" = wants to start the demo again. "other" = anything else.',
+    '"reset" = wants to start the demo again. "set_language" = asks you to reply in a certain language (e.g. "reply in Tamil", "Telugu lo cheppu", "Hindi mein bolo"). "other" = anything else.',
+    'Language: if the message uses only English words (like "plan", "help", "stock bread", "send order", "sold 5 bread"), or is just "hi", "hello" or "namaste", the language is "English".',
     'Numbers may be words in any language (Hindi "do" = 2, "paanch" = 5; Telugu "rendu" = 2; Tamil "moonu" = 3). ',
     'Map local product words to the ids above (for example "dahi" = curd, "doodh" = milk if listed). Leave out products not in the list.'
   ].join('\n');
@@ -118,7 +146,8 @@ async function understand(input) {
     items: Array.isArray(out.items)
       ? out.items.filter((x) => x && ids.has(x.product_id) && Number(x.qty) > 0).map((x) => ({ product_id: x.product_id, qty: Math.round(Number(x.qty)) }))
       : [],
-    product_id: ids.has(out.product_id) ? out.product_id : null
+    product_id: ids.has(out.product_id) ? out.product_id : null,
+    reply_language: out.reply_language ? String(out.reply_language) : null
   };
 }
 

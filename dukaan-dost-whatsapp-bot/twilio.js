@@ -48,7 +48,25 @@ function send(to, body) {
   return job;
 }
 
-function sendText(to, body) { return send(to, body); }
+/* WhatsApp via Twilio allows 1600 characters per message; long replies (Telugu, Tamil…) are split at line breaks. */
+function splitBody(body, max) {
+  const out = [];
+  let cur = '';
+  for (const line of String(body).split('\n')) {
+    const next = cur ? cur + '\n' + line : line;
+    if (next.length <= max) { cur = next; continue; }
+    if (cur) out.push(cur.trim());
+    cur = line.slice(0, max);
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.length ? out : [''];
+}
+
+async function sendText(to, body) {
+  let last = null;
+  for (const part of splitBody(body, 1500)) last = await send(to, part);
+  return last;
+}
 
 /* The Sandbox can’t show tap buttons, so we offer numbered replies instead (1, 2, 3). */
 function sendButtons(to, body, buttons) {
@@ -66,4 +84,4 @@ async function downloadMedia(media) {
 
 async function markRead() { /* not available on Twilio */ }
 
-module.exports = { sendText, sendButtons, downloadMedia, markRead, _reset: () => { lastSend = 0; chain = Promise.resolve(); } };
+module.exports = { textButtons: true, sendText, sendButtons, downloadMedia, markRead, _reset: () => { lastSend = 0; chain = Promise.resolve(); } };
