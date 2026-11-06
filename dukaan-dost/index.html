@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dukaan Dost – smart stock assistant for kirana stores</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=DM+Sans:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0F3D2E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M4 9v11h16V9"/><path d="M3 9h18"/><path d="M9 20v-6h6v6"/></svg>
+    </span>
+    <div>
+      <h1>Dukaan Dost</h1>
+      <p id="shopLine">Kirana store</p>
+    </div>
+  </div>
+  <p class="day-pill" id="dayLabel">Day 1</p>
+  <div class="top-actions">
+    <button class="btn ghost-light" type="button" data-action="simulate">Fill today’s sales (demo)</button>
+    <button class="btn amber" type="button" data-action="endDay">End day</button>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <a href="#chat" data-view="chat">Chat</a>
+  <a href="#dashboard" data-view="dashboard">Dashboard</a>
+  <a href="#stock" data-view="stock">Stock</a>
+  <a href="#orders" data-view="orders">Orders</a>
+  <a href="#offers" data-view="offers">Offers</a>
+  <a href="#settings" data-view="settings">Settings</a>
+</nav>
+
+<main id="view" tabindex="-1"></main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<footer class="foot">Dukaan Dost · FlairQuest 2.0 project · all shop data is sample data</footer>
+
+<script src="js/data.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
